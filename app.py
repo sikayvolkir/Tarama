@@ -75,15 +75,22 @@ def process_and_save_document(file):
     
     # 1. Supabase 'documents' tablosuna kayıt
     doc_res = supabase.table("documents").insert({"name": filename, "file_type": file_type}).execute()
+    if not doc_res.data:
+        st.error("Döküman ana tablosuna kaydedilemedi!")
+        return
+        
     doc_id = doc_res.data[0]["id"]
-
     chunks_to_insert = []
 
     if file_type == "pdf":
         pdf_file = io.BytesIO(file_bytes)
         reader = PyPDF2.PdfReader(pdf_file)
+        st.info(f"PDF Sayfa Sayısı: {len(reader.pages)}")
+        
         for page_num, page in enumerate(reader.pages, start=1):
             text = page.extract_text() or ""
+            st.write(f"Sayfa {page_num} okunan karakter sayısı: {len(text)}")
+            
             if text.strip():
                 words = text.split()
                 chunk_words = []
@@ -128,18 +135,35 @@ def process_and_save_document(file):
 
     if chunks_to_insert:
         supabase.table("document_chunks").insert(chunks_to_insert).execute()
+        st.success(f"Toplam {len(chunks_to_insert)} parça veritabanına başarıyla işlendi!")
+    else:
+        st.error("⚠️ Uyarı: Bu dosyadan hiç metin okunamadı! PDF taranmış bir görsel olabilir.")
 
 def search_in_supabase(query_text):
     query_vector = embedder.encode(query_text).tolist()
+    
+    # 1. Vektör (Anlamsal) Arama
     response = supabase.rpc(
         "match_chunks",
         {
             "query_embedding": query_vector,
-            "match_threshold": 0.05,  # Eşik düşürüldü, daha esnek ve detaylı arama yapar
-            "match_count": 8          # Getirilen sonuç sayısı artırıldı
+            "match_threshold": 0.01,
+            "match_count": 10
         }
     ).execute()
-    return response.data if response.data else []
+    
+    results = response.data if response.data else []
+    
+    # 2. Kelime Bazlı (ILIKE) Tam Eşleşme Desteği
+    text_search = supabase.table("document_chunks").select("id, document_name, page_number, content").ilike("content", f"%{query_text}%").limit(5).execute()
+    
+    if text_search.data:
+        for item in text_search.data:
+            if not any(r["id"] == item["id"] for r in results):
+                item["similarity"] = 0.99 
+                results.insert(0, item)
+                
+    return results
 
 def delete_document(doc_id):
     supabase.table("documents").delete().eq("id", doc_id).execute()
@@ -250,7 +274,6 @@ elif st.session_state.current_page == "sources":
             with st.spinner("Dosyalar Supabase veritabanına işleniyor..."):
                 for file in uploaded_files:
                     process_and_save_document(file)
-            st.success("Yeni kaynaklar veritabanına eklendi!")
             st.session_state.uploader_key += 1
             st.rerun()
         else:
@@ -307,34 +330,35 @@ elif st.session_state.current_page == "results":
 
     if not search_results:
         st.warning("❌ Yüklenen kaynaklar içerisinde aradığınız konuyla alakalı herhangi bir içerik bulunamadı.")
-    else:
-        st.subheader("🖼️ Bulunan Sayfalar ve Bölümler (Görsel İnceleme)")
+        st.stop()
 
-        selected_index = st.slider("Bulunan Sonuçlar Arasında Geçiş Yapın", 1, len(search_results), 1) - 1
-        current_item = search_results[selected_index]
-        similarity_pct = int(current_item["similarity"] * 100)
+    st.subheader("🖼️ Bulunan Sayfalar ve Bölümler (Görsel İnceleme)")
 
-        card_img, card_bytes = generate_result_card(
-            current_item['document_name'], 
-            current_item['page_number'], 
-            current_item['content'], 
-            similarity_pct
-        )
+    selected_index = st.slider("Bulunan Sonuçlar Arasında Geçiş Yapın", 1, len(search_results), 1) - 1
+    current_item = search_results[selected_index]
+    similarity_pct = int(current_item.get("similarity", 0.99) * 100)
 
-        st.image(card_img, caption=f"{current_item['document_name']} — Sayfa/Bölüm: {current_item['page_number']}", use_container_width=True)
+    card_img, card_bytes = generate_result_card(
+        current_item['document_name'], 
+        current_item['page_number'], 
+        current_item['content'], 
+        similarity_pct
+    )
 
-        st.markdown("<br><hr><br>", unsafe_allow_html=True)
-        st.subheader("📋 Alakalı Yerler Listesi (Alaka Sırasına Göre)")
+    st.image(card_img, caption=f"{current_item['document_name']} — Sayfa/Bölüm: {current_item['page_number']}", use_container_width=True)
 
-        for idx, item in enumerate(search_results, 1):
-            score = int(item["similarity"] * 100)
-            with st.expander(f"{idx}. {item['document_name']} — Sayfa {item['page_number']} (%{score} Alaka)"):
-                st.write(item["content"])
+    st.markdown("<br><hr><br>", unsafe_allow_html=True)
+    st.subheader("📋 Alakalı Yerler Listesi (Alaka Sırasına Göre)")
 
-        st.markdown("<br>", unsafe_allow_html=True)
-        st.download_button(
-            label="📸 Görseli / Kartı Galeriye Kaydet",
-            data=card_bytes,
-            file_name=f"{current_item['document_name']}_Sayfa_{current_item['page_number']}.png",
-            mime="image/png"
-        )
+    for idx, item in enumerate(search_results, 1):
+        score = int(item.get("similarity", 0.99) * 100)
+        with st.expander(f"{idx}. {item['document_name']} — Sayfa {item['page_number']} (%{score} Alaka)"):
+            st.write(item["content"])
+
+    st.markdown("<br>", unsafe_allow_html=True)
+    st.download_button(
+        label="📸 Görseli / Kartı Galeriye Kaydet",
+        data=card_bytes,
+        file_name=f"{current_item['document_name']}_Sayfa_{current_item['page_number']}.png",
+        mime="image/png"
+    )
