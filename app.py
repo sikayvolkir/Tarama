@@ -5,6 +5,14 @@ from PIL import Image, ImageDraw
 from supabase import create_client, Client
 from sentence_transformers import SentenceTransformer
 
+# OCR için gerekli kütüphaneler
+try:
+    from pdf2image import convert_from_bytes
+    import pytesseract
+    HAS_OCR = True
+except ImportError:
+    HAS_OCR = False
+
 # ---------------------------------------------------------
 # 1. Supabase ve Model Bağlantısı
 # ---------------------------------------------------------
@@ -65,7 +73,7 @@ custom_css = f"""
 st.markdown(custom_css, unsafe_allow_html=True)
 
 # ---------------------------------------------------------
-# Yardımcı Fonksiyonlar
+# Yardımcı Fonksiyonlar (OCR ve Anlamsal İşleme Dahil)
 # ---------------------------------------------------------
 def process_and_save_document(file):
     filename = file.name
@@ -84,8 +92,29 @@ def process_and_save_document(file):
         pdf_file = io.BytesIO(file_bytes)
         reader = PyPDF2.PdfReader(pdf_file)
         
+        extracted_pages_text = {}
+        
+        # 1. Adım: Standart PDF metin okuma denenir
         for page_num, page in enumerate(reader.pages, start=1):
             text = page.extract_text() or ""
+            extracted_pages_text[page_num] = text.strip()
+
+        total_chars = sum(len(t) for t in extracted_pages_text.values())
+
+        # 2. Adım: Eğer metin çıkmadıysa ve OCR kütüphaneleri yüklüyse taranmış görsel PDF olarak işlenir
+        if total_chars == 0 and HAS_OCR:
+            st.info(f"📷 '{filename}' taranmış görsel PDF olarak algılandı. OCR (Görselden metin okuma) uygulanıyor...")
+            try:
+                images = convert_from_bytes(file_bytes)
+                for page_num, img in enumerate(images, start=1):
+                    # Türkçe karakter desteğiyle OCR yapılıyor
+                    ocr_text = pytesseract.image_to_string(img, lang='tur')
+                    extracted_pages_text[page_num] = ocr_text.strip()
+            except Exception as ocr_err:
+                st.warning(f"OCR İşlem Hatası: {ocr_err}")
+
+        # Okunan metinler parçalara (chunks) bölünerek vektörleştirilir
+        for page_num, text in extracted_pages_text.items():
             if text.strip():
                 words = text.split()
                 chunk_words = []
@@ -115,6 +144,7 @@ def process_and_save_document(file):
                         "content": chunk_text,
                         "embedding": vec
                     })
+                    
     elif file_type == "txt":
         text = file_bytes.decode("utf-8", errors="ignore")
         paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
@@ -130,14 +160,13 @@ def process_and_save_document(file):
 
     if chunks_to_insert:
         supabase.table("document_chunks").insert(chunks_to_insert).execute()
-        st.success(f"Toplam {len(chunks_to_insert)} parça veritabanına başarıyla işlendi!")
+        st.success(f"✅ '{filename}' başarıyla işlendi ve {len(chunks_to_insert)} parça veritabanına kaydedildi!")
     else:
-        st.error("⚠️ Uyarı: Bu dosyadan hiç metin okunamadı!")
+        st.error(f"❌ '{filename}' dosyasından hiç metin okunamadı! (Sunucuda Tesseract OCR araçlarının kurulu olduğundan emin olun).")
 
 def search_in_supabase(query_text):
     query_vector = embedder.encode(query_text).tolist()
     
-    # Eşik değerini 0.55 yaparak zayıf/alakasız eşleşmeleri tamamen eliyoruz
     response = supabase.rpc(
         "match_chunks",
         {
@@ -255,7 +284,7 @@ elif st.session_state.current_page == "sources":
 
     if st.button("✅ Tamam (Ekle)"):
         if uploaded_files:
-            with st.spinner("Dosyalar Supabase veritabanına işleniyor..."):
+            with st.spinner("Dosyalar okunuyor ve Supabase'e işleniyor..."):
                 for file in uploaded_files:
                     process_and_save_document(file)
             st.session_state.uploader_key += 1
