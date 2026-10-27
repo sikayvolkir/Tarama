@@ -1,21 +1,39 @@
 import streamlit as st
-import os
 import io
+import PyPDF2
 from PIL import Image
+from supabase import create_client, Client
+from sentence_transformers import SentenceTransformer
 
 # ---------------------------------------------------------
-# 1. Sayfa Yapılandırması ve Oturum (Session State) Başlatma
+# 1. Supabase ve Model Bağlantısı
 # ---------------------------------------------------------
-st.set_page_config(
-    page_title="Akıllı Kaynak ve Arama Asistanı",
-    layout="wide",
-    initial_sidebar_state="collapsed"
-)
+# Streamlit Secrets (.streamlit/secrets.toml) veya direkt değerler ile kullanılabilir
+SUPABASE_URL = st.secrets.get("SUPABASE_URL", "https://YOUR_SUPABASE_URL.supabase.co")
+SUPABASE_KEY = st.secrets.get("SUPABASE_KEY", "YOUR_SUPABASE_ANON_KEY")
 
-# Yönlendirme ve Tema Durumları
+@st.cache_resource
+def init_supabase() -> Client:
+    return create_client(SUPABASE_URL, SUPABASE_KEY)
+
+@st.cache_resource
+def load_embedder():
+    # Türkçe ve çok dilli metinler için hafif ve etkili açık kaynaklı vektör modeli (384 boyutlu)
+    return SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
+
+try:
+    supabase = init_supabase()
+    embedder = load_embedder()
+except Exception as e:
+    st.error(f"Bağlantı Kurulamadı: {e}")
+
+# ---------------------------------------------------------
+# 2. Sayfa Yapılandırması ve Session State
+# ---------------------------------------------------------
+st.set_page_config(page_title="Akıllı Kaynak ve Arama Asistanı", layout="wide", initial_sidebar_state="collapsed")
+
 if "current_page" not in st.session_state:
-    st.session_state.current_page = "home"  # 'home', 'sources', 'settings', 'results'
-
+    st.session_state.current_page = "home"
 if "bg_color" not in st.session_state:
     st.session_state.bg_color = "#f4f6f9"
 if "primary_color" not in st.session_state:
@@ -26,69 +44,90 @@ if "font_size" not in st.session_state:
     st.session_state.font_size = 16
 if "font_family" not in st.session_state:
     st.session_state.font_family = "sans-serif"
-
-if "sources_list" not in st.session_state:
-    st.session_state.sources_list = []
-
 if "search_query" not in st.session_state:
     st.session_state.search_query = ""
-
 if "uploader_key" not in st.session_state:
     st.session_state.uploader_key = 0
 
 # ---------------------------------------------------------
-# 2. Dinamik CSS (Ayar Değişikliklerinin Tüm Sayfaya Etkisi)
+# 3. Dinamik CSS
 # ---------------------------------------------------------
 custom_css = f"""
     <style>
-    /* Ana Arka Plan ve Font */
-    .stApp {{
-        background-color: {st.session_state.bg_color};
-        color: {st.session_state.text_color};
-        font-family: {st.session_state.font_family};
-        font-size: {st.session_state.font_size}px;
-    }}
-    
-    /* Başlıklar ve Metinler */
-    h1, h2, h3, h4, h5, h6, p, label, .stMarkdown {{
-        color: {st.session_state.text_color} !important;
-        font-family: {st.session_state.font_family} !important;
-    }}
-    
-    /* Buton Tasarımları */
-    .stButton>button {{
-        background-color: {st.session_state.primary_color};
-        color: #ffffff !important;
-        border-radius: 8px;
-        border: none;
-        padding: 0.5rem 1rem;
-        font-weight: 600;
-        transition: all 0.3s ease;
-    }}
-    
-    .stButton>button:hover {{
-        opacity: 0.85;
-        transform: translateY(-1px);
-    }}
-    
-    /* Giriş Kutusu */
-    .stTextInput input {{
-        font-size: {st.session_state.font_size}px;
-        border-radius: 8px;
-        border: 1px solid #ccc;
-    }}
-
-    /* Sidebar'ı Gizle */
+    .stApp {{ background-color: {st.session_state.bg_color}; color: {st.session_state.text_color}; font-family: {st.session_state.font_family}; font-size: {st.session_state.font_size}px; }}
+    h1, h2, h3, h4, h5, h6, p, label, .stMarkdown {{ color: {st.session_state.text_color} !important; font-family: {st.session_state.font_family} !important; }}
+    .stButton>button {{ background-color: {st.session_state.primary_color}; color: #ffffff !important; border-radius: 8px; border: none; padding: 0.5rem 1rem; font-weight: 600; }}
     [data-testid="collapsedControl"] {{ display: none; }}
     </style>
 """
 st.markdown(custom_css, unsafe_allow_html=True)
 
 # ---------------------------------------------------------
+# Yardımcı Fonksiyonlar (Arama ve Döküman İşleme)
+# ---------------------------------------------------------
+def process_and_save_document(file):
+    filename = file.name
+    file_type = filename.split(".")[-1].lower()
+    
+    # 1. Supabase 'documents' tablosuna kayıt
+    doc_res = supabase.table("documents").insert({"name": filename, "file_type": file_type}).execute()
+    doc_id = doc_res.data[0]["id"]
+
+    chunks_to_insert = []
+
+    if file_type == "pdf":
+        reader = PyPDF2.PdfReader(file)
+        for page_num, page in enumerate(reader.pages, start=1):
+            text = page.extract_text() or ""
+            if text.strip():
+                # Sayfa metnini parçala (her ~500 karakter)
+                chunk_size = 500
+                for i in range(0, len(text), chunk_size):
+                    chunk_text = text[i:i+chunk_size]
+                    vec = embedder.encode(chunk_text).tolist()
+                    chunks_to_insert.append({
+                        "document_id": doc_id,
+                        "document_name": filename,
+                        "page_number": page_num,
+                        "content": chunk_text,
+                        "embedding": vec
+                    })
+    elif file_type == "txt":
+        text = file.read().decode("utf-8")
+        chunk_size = 500
+        for i in range(0, len(text), chunk_size):
+            chunk_text = text[i:i+chunk_size]
+            vec = embedder.encode(chunk_text).tolist()
+            chunks_to_insert.append({
+                "document_id": doc_id,
+                "document_name": filename,
+                "page_number": 1,
+                "content": chunk_text,
+                "embedding": vec
+            })
+
+    if chunks_to_insert:
+        supabase.table("document_chunks").insert(chunks_to_insert).execute()
+
+def search_in_supabase(query_text):
+    # Sadece Supabase veritabanındaki kaynaklarda arama yapar
+    query_vector = embedder.encode(query_text).tolist()
+    
+    response = supabase.rpc(
+        "match_chunks",
+        {
+            "query_embedding": query_vector,
+            "match_threshold": 0.25,  # Benzerlik eşiği (0-1 arası)
+            "match_count": 5          # En alakalı ilk 5 sonuç
+        }
+    ).execute()
+    
+    return response.data
+
+# ---------------------------------------------------------
 # Sayfa 1: ANA SAYFA
 # ---------------------------------------------------------
 if st.session_state.current_page == "home":
-    # Sağ üst köşeye Ayarlar Butonu
     top_col1, top_col2 = st.columns([0.9, 0.1])
     with top_col2:
         if st.button("⚙️ Ayarlar", key="btn_to_settings"):
@@ -96,8 +135,6 @@ if st.session_state.current_page == "home":
             st.rerun()
 
     st.markdown("<br><br>", unsafe_allow_html=True)
-    
-    # Karşılama ve Arama Alanı
     st.markdown("<h1 style='text-align: center;'>Merak ettiğiniz konuyu giriniz</h1>", unsafe_allow_html=True)
     
     col_left, col_center, col_right = st.columns([0.15, 0.7, 0.15])
@@ -115,8 +152,6 @@ if st.session_state.current_page == "home":
                     st.warning("Lütfen bir soru veya metin giriniz.")
 
     st.markdown("<br><br><hr><br>", unsafe_allow_html=True)
-    
-    # Alttaki Kaynaklar Butonu
     b_col1, b_col2, b_col3 = st.columns([0.4, 0.2, 0.4])
     with b_col2:
         if st.button("📚 Kaynaklar", use_container_width=True):
@@ -127,7 +162,6 @@ if st.session_state.current_page == "home":
 # Sayfa 2: KAYNAKLAR
 # ---------------------------------------------------------
 elif st.session_state.current_page == "sources":
-    # Sol Üst Geri Dön Butonu
     if st.button("⬅️ Geri Dön", key="back_from_sources"):
         st.session_state.current_page = "home"
         st.rerun()
@@ -135,17 +169,18 @@ elif st.session_state.current_page == "sources":
     st.title("📚 Kaynak Yönetimi")
     st.markdown("---")
 
-    # Mevcut Kaynakların Listelenmesi
-    st.subheader("Kayıtlı Kaynaklar")
-    if not st.session_state.sources_list:
-        st.info("Henüz yüklenmiş bir kaynak bulunmuyor.")
+    st.subheader("Supabase'de Kayıtlı Kaynaklar")
+    # Kayıtlı dökümanları doğrudan Supabase'den çek
+    docs_res = supabase.table("documents").select("*").execute()
+    existing_docs = docs_res.data if docs_res.data else []
+
+    if not existing_docs:
+        st.info("Henüz veritabanında yüklenmiş bir kaynak bulunmuyor.")
     else:
-        for idx, src in enumerate(st.session_state.sources_list, 1):
-            st.write(f"**{idx}.** 📄 {src['name']} *({src['type'].upper()} - {src['size']} KB)*")
+        for idx, src in enumerate(existing_docs, 1):
+            st.write(f"**{idx}.** 📄 {src['name']} *({src['file_type'].upper()})*")
 
     st.markdown("---")
-
-    # Yeni Kaynak Ekleme Alanı
     st.subheader("Yeni Kaynak Ekle")
     uploaded_files = st.file_uploader(
         "TXT veya PDF formatında dosyaları seçin", 
@@ -156,14 +191,10 @@ elif st.session_state.current_page == "sources":
 
     if st.button("✅ Tamam (Ekle)"):
         if uploaded_files:
-            for file in uploaded_files:
-                st.session_state.sources_list.append({
-                    "name": file.name,
-                    "type": file.name.split(".")[-1],
-                    "size": round(file.size / 1024, 2)
-                })
-            st.success("Yeni kaynaklar başarıyla eklendi!")
-            # Uploader kutusunu temizlemek için key değerini değiştirip sayfayı yeniliyoruz
+            with st.spinner("Dosyalar Supabase veritabanına işleniyor..."):
+                for file in uploaded_files:
+                    process_and_save_document(file)
+            st.success("Yeni kaynaklar veritabanına eklendi!")
             st.session_state.uploader_key += 1
             st.rerun()
         else:
@@ -173,7 +204,6 @@ elif st.session_state.current_page == "sources":
 # Sayfa 3: AYARLAR
 # ---------------------------------------------------------
 elif st.session_state.current_page == "settings":
-    # Sol Üst Geri Dön
     if st.button("⬅️ Geri Dön", key="back_from_settings"):
         st.session_state.current_page = "home"
         st.rerun()
@@ -182,7 +212,6 @@ elif st.session_state.current_page == "settings":
     st.markdown("---")
 
     col1, col2 = st.columns(2)
-
     with col1:
         new_bg = st.color_picker("Arka Plan Rengi", st.session_state.bg_color)
         new_primary = st.color_picker("Buton ve Vurgu Rengi", st.session_state.primary_color)
@@ -196,70 +225,63 @@ elif st.session_state.current_page == "settings":
             index=0
         )
 
-    st.markdown("<br>", unsafe_allow_html=True)
     if st.button("💾 Kaydet"):
         st.session_state.bg_color = new_bg
         st.session_state.primary_color = new_primary
         st.session_state.text_color = new_text
         st.session_state.font_size = new_font_size
         st.session_state.font_family = new_font_family
-        st.success("Ayarlar başarıyla kaydedildi!")
+        st.success("Ayarlar kaydedildi!")
         st.rerun()
 
 # ---------------------------------------------------------
-# Sayfa 4: SONUÇLAR VE CEVAP
+# Sayfa 4: SONUÇLAR VE CEVAP (Sadece Gerçek Kaynaklar)
 # ---------------------------------------------------------
 elif st.session_state.current_page == "results":
     if st.button("⬅️ Geri Dön", key="back_from_results"):
         st.session_state.current_page = "home"
         st.rerun()
 
-    st.title("🔍 Arama ve Eşleşme Sonuçları")
-    st.markdown(f"**Aranan Konu / Soru:** *{st.session_state.search_query}*")
+    st.title("🔍 Arama Sonuçları")
+    st.markdown(f"**Aranan Konu:** *{st.session_state.search_query}*")
     st.markdown("---")
 
-    # MOCK / TEMSİLİ BULUNAN SAYFA GÖRSELLERİ (RAG Motoru bağlandığında buraya dinamik veriler gelecek)
-    mock_results = [
-        {"book": "Mekanik_Sistemler_Cilt1.pdf", "page": 42, "score": "%96 Alaka", "img_color": "lightblue", "text": "İlgili konunun ilk geçtiği temel tanım alanı."},
-        {"book": "Mekanik_Sistemler_Cilt1.pdf", "page": 43, "score": "%88 Alaka", "img_color": "lightgreen", "text": "Açıklamanın devamı ve formül detayları."},
-        {"book": "Tasarim_El_Kitabi.pdf", "page": 105, "score": "%75 Alaka", "img_color": "lightpink", "text": "Farklı bir kaynaktaki benzer kullanım örneği."}
-    ]
+    # SADECE KAYITLI DÖKÜMANLARDA ARAMA YAP
+    with st.spinner("Sadece yüklenen kaynaklar taranıyor..."):
+        search_results = search_in_supabase(st.session_state.search_query)
 
-    st.subheader("🖼️ Bulunan Sayfalar (Görsel İnceleme)")
+    if not search_results:
+        st.warning("❌ Yüklenen kaynaklar içerisinde aradığınız konuyla alakalı herhangi bir içerik bulunamadı.")
+    else:
+        st.subheader("🖼️ Bulunan Sayfalar ve Bölümler")
 
-    # Sayfalar Arası Kaydırma / Slayt Mantığı
-    selected_index = st.slider("Sayfalar Arasında Geçiş Yapın", 1, len(mock_results), 1) - 1
-    current_item = mock_results[selected_index]
+        selected_index = st.slider("Bulunan Sonuçlar Arasında Geçiş Yapın", 1, len(search_results), 1) - 1
+        current_item = search_results[selected_index]
+        similarity_pct = int(current_item["similarity"] * 100)
 
-    # Temsili Sayfa Görseli Oluşturma (Görsel olarak gösterme simülasyonu)
-    img = Image.new("RGB", (700, 450), color=current_item["img_color"])
-    img_byte_arr = io.BytesIO()
-    img.save(img_byte_arr, format='PNG')
-    img_bytes = img_byte_arr.getvalue()
+        # Metin Kartı Görselleştirmesi
+        st.info(f"**Kitap / Döküman:** {current_item['document_name']} | **Sayfa:** {current_item['page_number']} | **Alaka Oranı:** %{similarity_pct}")
+        
+        # Temsili Sayfa Kartı Görseli Oluşturma
+        img = Image.new("RGB", (700, 300), color="#ffffff")
+        img_byte_arr = io.BytesIO()
+        img.save(img_byte_arr, format='PNG')
+        img_bytes = img_byte_arr.getvalue()
 
-    c1, c2, c3 = st.columns([0.1, 0.8, 0.1])
-    with c2:
-        st.image(
-            img, 
-            caption=f"Kitap: {current_item['book']} | Sayfa: {current_item['page']} ({current_item['score']})",
-            use_container_width=True
+        st.markdown(f"> *\"{current_item['content']}\"*")
+
+        st.markdown("<br><hr><br>", unsafe_allow_html=True)
+        st.subheader("📋 Alakalı Yerler Listesi (Alaka Sırasına Göre)")
+
+        for idx, item in enumerate(search_results, 1):
+            score = int(item["similarity"] * 100)
+            with st.expander(f"{idx}. {item['document_name']} — Sayfa {item['page_number']} (%{score} Alaka)"):
+                st.write(item["content"])
+
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.download_button(
+            label="📸 Görseli Galeriye Kaydet",
+            data=img_bytes,
+            file_name=f"{current_item['document_name']}_Sayfa_{current_item['page_number']}.png",
+            mime="image/png"
         )
-
-    st.markdown("<br><hr><br>", unsafe_allow_html=True)
-
-    # Alaka Sırasına Göre Liste
-    st.subheader("📋 Alakalı Yerler Listesi (Alaka Sırasına Göre)")
-    
-    for idx, item in enumerate(mock_results, 1):
-        with st.expander(f"{idx}. {item['book']} — Sayfa {item['page']} ({item['score']})"):
-            st.write(f"**Özet/Metin Bölümü:** {item['text']}")
-
-    st.markdown("<br>", unsafe_allow_html=True)
-
-    # İndirme / Galeriye Kaydetme Butonu (📸 İkonlu)
-    st.download_button(
-        label="📸 Görseli Galeriye Kaydet",
-        data=img_bytes,
-        file_name=f"{current_item['book']}_Sayfa_{current_item['page']}.png",
-        mime="image/png"
-    )
