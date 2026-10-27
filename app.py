@@ -21,7 +21,6 @@ def init_supabase() -> Client:
 
 @st.cache_resource
 def load_embedder():
-    # Türkçe ve çok dilli metinler için vektör modeli
     return SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
 
 try:
@@ -66,14 +65,13 @@ custom_css = f"""
 st.markdown(custom_css, unsafe_allow_html=True)
 
 # ---------------------------------------------------------
-# Yardımcı Fonksiyonlar (Döküman İşleme, Görsel & Arama)
+# Yardımcı Fonksiyonlar
 # ---------------------------------------------------------
 def process_and_save_document(file):
     filename = file.name
     file_bytes = file.read()
     file_type = filename.split(".")[-1].lower()
     
-    # 1. Supabase 'documents' tablosuna kayıt
     doc_res = supabase.table("documents").insert({"name": filename, "file_type": file_type}).execute()
     if not doc_res.data:
         st.error("Döküman ana tablosuna kaydedilemedi!")
@@ -142,7 +140,6 @@ def process_and_save_document(file):
 def search_in_supabase(query_text):
     query_vector = embedder.encode(query_text).tolist()
     
-    # 1. Vektör (Anlamsal) Arama
     response = supabase.rpc(
         "match_chunks",
         {
@@ -154,7 +151,6 @@ def search_in_supabase(query_text):
     
     results = response.data if response.data else []
     
-    # 2. Kelime Bazlı (ILIKE) Tam Eşleşme Desteği
     text_search = supabase.table("document_chunks").select("id, document_name, page_number, content").ilike("content", f"%{query_text}%").limit(5).execute()
     
     if text_search.data:
@@ -328,38 +324,44 @@ elif st.session_state.current_page == "results":
     with st.spinner("Sadece yüklenen kaynaklar taranıyor..."):
         search_results = search_in_supabase(st.session_state.search_query)
 
-    # Güvenli kontrol: Sonuç yoksa slider'a girmeden durduruyoruz
+    # Güvenli Kontrol: Sonuç yoksa slider'a hiç girmeden temiz bir uyarı verip durduruyoruz
     if not search_results or len(search_results) == 0:
         st.warning("❌ Yüklenen kaynaklar içerisinde aradığınız konuyla alakalı herhangi bir içerik bulunamadı.")
-        st.stop()
+    else:
+        st.subheader("🖼️ Bulunan Sayfalar ve Bölümler (Görsel İnceleme)")
 
-    st.subheader("🖼️ Bulunan Sayfalar ve Bölümler (Görsel İnceleme)")
+        # Slider hatasını önlemek için dinamik güvenli aralık kontrolü
+        max_val = len(search_results)
+        if max_val > 1:
+            selected_index = st.slider("Bulunan Sonuçlar Arasında Geçiş Yapın", 1, max_val, 1) - 1
+        else:
+            selected_index = 0
+            st.info("Tek bir sonuç bulundu.")
 
-    selected_index = st.slider("Bulunan Sonuçlar Arasında Geçiş Yapın", 1, len(search_results), 1) - 1
-    current_item = search_results[selected_index]
-    similarity_pct = int(current_item.get("similarity", 0.99) * 100)
+        current_item = search_results[selected_index]
+        similarity_pct = int(current_item.get("similarity", 0.99) * 100)
 
-    card_img, card_bytes = generate_result_card(
-        current_item['document_name'], 
-        current_item['page_number'], 
-        current_item['content'], 
-        similarity_pct
-    )
+        card_img, card_bytes = generate_result_card(
+            current_item['document_name'], 
+            current_item['page_number'], 
+            current_item['content'], 
+            similarity_pct
+        )
 
-    st.image(card_img, caption=f"{current_item['document_name']} — Sayfa/Bölüm: {current_item['page_number']}", use_container_width=True)
+        st.image(card_img, caption=f"{current_item['document_name']} — Sayfa/Bölüm: {current_item['page_number']}", use_container_width=True)
 
-    st.markdown("<br><hr><br>", unsafe_allow_html=True)
-    st.subheader("📋 Alakalı Yerler Listesi (Alaka Sırasına Göre)")
+        st.markdown("<br><hr><br>", unsafe_allow_html=True)
+        st.subheader("📋 Alakalı Yerler Listesi (Alaka Sırasına Göre)")
 
-    for idx, item in enumerate(search_results, 1):
-        score = int(item.get("similarity", 0.99) * 100)
-        with st.expander(f"{idx}. {item['document_name']} — Sayfa {item['page_number']} (%{score} Alaka)"):
-            st.write(item["content"])
+        for idx, item in enumerate(search_results, 1):
+            score = int(item.get("similarity", 0.99) * 100)
+            with st.expander(f"{idx}. {item['document_name']} — Sayfa {item['page_number']} (%{score} Alaka)"):
+                st.write(item["content"])
 
-    st.markdown("<br>", unsafe_allow_html=True)
-    st.download_button(
-        label="📸 Görseli / Kartı Galeriye Kaydet",
-        data=card_bytes,
-        file_name=f"{current_item['document_name']}_Sayfa_{current_item['page_number']}.png",
-        mime="image/png"
-    )
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.download_button(
+            label="📸 Görseli / Kartı Galeriye Kaydet",
+            data=card_bytes,
+            file_name=f"{current_item['document_name']}_Sayfa_{current_item['page_number']}.png",
+            mime="image/png"
+        )
