@@ -5,7 +5,7 @@ from PIL import Image, ImageDraw
 from supabase import create_client, Client
 from sentence_transformers import SentenceTransformer
 
-# OCR kütüphaneleri
+# OCR kütüphaneleri kontrolü
 try:
     from pdf2image import convert_from_bytes
     import pytesseract
@@ -73,54 +73,105 @@ custom_css = f"""
 st.markdown(custom_css, unsafe_allow_html=True)
 
 # ---------------------------------------------------------
-# Yardımcı Fonksiyonlar (Hata Ayıklama Modlu OCR)
+# Yardımcı Fonksiyonlar (Canlı Durum Takipli İşleme)
 # ---------------------------------------------------------
 def process_and_save_document(file):
     filename = file.name
     file_bytes = file.read()
     file_type = filename.split(".")[-1].lower()
     
-    doc_res = supabase.table("documents").insert({"name": filename, "file_type": file_type}).execute()
-    if not doc_res.data:
-        st.error("Döküman ana tablosuna kaydedilemedi!")
-        return
+    # Canlı Adım Takip Ekranı (Status Box)
+    with st.status(f"📥 '{filename}' işleniyor...", expanded=True) as status:
         
-    doc_id = doc_res.data[0]["id"]
-    chunks_to_insert = []
-
-    if file_type == "pdf":
-        pdf_file = io.BytesIO(file_bytes)
-        reader = PyPDF2.PdfReader(pdf_file)
-        
+        st.write("🔄 Supabase 'documents' tablosuna kayıt açılıyor...")
+        doc_res = supabase.table("documents").insert({"name": filename, "file_type": file_type}).execute()
+        if not doc_res.data:
+            status.update(label="❌ Hata: Döküman ana tablosuna kaydedilemedi!", state="error")
+            return
+            
+        doc_id = doc_res.data[0]["id"]
+        chunks_to_insert = []
         extracted_pages_text = {}
-        
-        # 1. Adım: Standart metin okuma denenir
-        for page_num, page in enumerate(reader.pages, start=1):
-            text = page.extract_text() or ""
-            extracted_pages_text[page_num] = text.strip()
 
-        total_chars = sum(len(t) for t in extracted_pages_text.values())
-        st.write(f"📄 '{filename}' dosyasından PyPDF2 ile okunan toplam karakter: {total_chars}")
+        if file_type == "pdf":
+            st.write("📖 PDF yapısı analiz ediliyor...")
+            pdf_file = io.BytesIO(file_bytes)
+            reader = PyPDF2.PdfReader(pdf_file)
+            
+            # 1. Adım: Standart metin okuma denenir
+            for page_num, page in enumerate(reader.pages, start=1):
+                text = page.extract_text() or ""
+                extracted_pages_text[page_num] = text.strip()
 
-        # 2. Adım: Metin çıkmadıysa OCR devreye girer
-        if total_chars == 0:
-            if not HAS_OCR:
-                st.error("❌ Bu PDF taranmış bir görsel! Python OCR kütüphaneleri (pdf2image, pytesseract) yüklü değil.")
-            else:
-                st.info(f"📷 '{filename}' taranmış görsel PDF algılandı. OCR ile metinler taranıyor...")
+            total_chars = sum(len(t) for t in extracted_pages_text.values())
+            st.write(f"🔎 Standart okuma ile bulunan toplam karakter: {total_chars}")
+
+            # 2. Adım: Metin yoksa ve taranmış PDF ise OCR devreye girer
+            if total_chars < 20:
+                if not HAS_OCR:
+                    status.update(label="❌ Taranmış PDF algılandı ancak OCR kütüphaneleri eksik!", state="error")
+                    st.error("Python ortamında 'pdf2image' ve 'pytesseract' kütüphaneleri kurulu değil.")
+                    return
+                
+                st.write("📷 Taranmış görsel PDF algılandı! OCR (Görselden metin okuma) başlatılıyor...")
                 try:
                     images = convert_from_bytes(file_bytes)
-                    st.write(f"🖼️ Görsele dönüştürülen sayfa sayısı: {len(images)}")
+                    st.write(f"🖼️ Toplam {len(images)} sayfa görsele dönüştürüldü, metinler taranıyor...")
                     for page_num, img in enumerate(images, start=1):
                         ocr_text = pytesseract.image_to_string(img, lang='tur')
                         extracted_pages_text[page_num] = ocr_text.strip()
-                        st.write(f"Sayfa {page_num} OCR okunan karakter: {len(ocr_text.strip())}")
+                        st.write(f"✔️ Sayfa {page_num} OCR ile okundu ({len(ocr_text.strip())} karakter).")
                 except Exception as ocr_err:
-                    st.error(f"❌ OCR Çalıştırılırken Kritik Hata: {ocr_err}")
-                    st.warning("Bu hata genellikle sunucuda 'tesseract-ocr' veya 'poppler' sistem paketlerinin kurulu olmadığını gösterir.")
+                    status.update(label="❌ OCR İşlem Hatası!", state="error")
+                    st.error(f"OCR çalıştırılırken hata oluştu: {ocr_err}")
+                    return
 
-        # Okunan metinleri parçalayıp vektörleştiriyoruz
-        for page_num, text in extracted_pages_text.items():
+            st.write("🧠 Metinler anlam bütünlüğüne göre parçalara (chunks) ayrılıyor ve vektörleştiriliyor...")
+            for page_num, text in extracted_pages_text.items():
+                if text.strip():
+                    words = text.split()
+                    chunk_words = []
+                    curr_len = 0
+                    for w in words:
+                        chunk_words.append(w)
+                        curr_len += len(w) + 1
+                        if curr_len >= 500:
+                            chunk_text = " ".join(chunk_words)
+                            vec = embedder.encode(chunk_text).tolist()
+                            chunks_to_insert.append({
+                                "document_id": doc_id,
+                                "document_name": filename,
+                                "page_number": page_num,
+                                "content": chunk_text,
+                                "embedding": vec
+                            })
+                            chunk_words = []
+                            curr_len = 0
+                    if chunk_words:
+                        chunk_text = " ".join(chunk_words)
+                        vec = embedder.encode(chunk_text).tolist()
+                        chunks_to_insert.append({
+                            "document_id": doc_id,
+                            "document_name": filename,
+                            "page_number": page_num,
+                            "content": chunk_text,
+                            "embedding": vec
+                        })
+                        
+        elif file_type == "txt":
+            st.write("📝 TXT dosyası okunuyor ve kodlama formatı çözümleniyor...")
+            text = ""
+            for encoding in ["utf-8", "cp1254", "latin-1", "iso-8859-9"]:
+                try:
+                    text = file_bytes.decode(encoding)
+                    break
+                except UnicodeDecodeError:
+                    continue
+            if not text:
+                text = file_bytes.decode("utf-8", errors="ignore")
+                
+            st.write(f"📊 Okunan toplam metin uzunluğu: {len(text)} karakter")
+            
             if text.strip():
                 words = text.split()
                 chunk_words = []
@@ -134,7 +185,7 @@ def process_and_save_document(file):
                         chunks_to_insert.append({
                             "document_id": doc_id,
                             "document_name": filename,
-                            "page_number": page_num,
+                            "page_number": 1,
                             "content": chunk_text,
                             "embedding": vec
                         })
@@ -146,29 +197,17 @@ def process_and_save_document(file):
                     chunks_to_insert.append({
                         "document_id": doc_id,
                         "document_name": filename,
-                        "page_number": page_num,
+                        "page_number": 1,
                         "content": chunk_text,
                         "embedding": vec
                     })
-                    
-    elif file_type == "txt":
-        text = file_bytes.decode("utf-8", errors="ignore")
-        paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
-        for p_idx, para in enumerate(paragraphs, start=1):
-            vec = embedder.encode(para).tolist()
-            chunks_to_insert.append({
-                "document_id": doc_id,
-                "document_name": filename,
-                "page_number": p_idx,
-                "content": para,
-                "embedding": vec
-            })
 
-    if chunks_to_insert:
-        supabase.table("document_chunks").insert(chunks_to_insert).execute()
-        st.success(f"✅ '{filename}' başarıyla işlendi ve {len(chunks_to_insert)} parça veritabanına kaydedildi!")
-    else:
-        st.error(f"❌ '{filename}' için veritabanına eklenecek hiçbir metin parçası oluşturulamadı.")
+        if chunks_to_insert:
+            st.write("💾 Supabase 'document_chunks' tablosuna kayıtlar yazılıyor...")
+            supabase.table("document_chunks").insert(chunks_to_insert).execute()
+            status.update(label=f"✅ '{filename}' başarıyla işlendi ({len(chunks_to_insert)} parça kaydedildi)!", state="complete", expanded=False)
+        else:
+            status.update(label=f"❌ '{filename}' dosyasından okunabilir metin çıkarılamadı!", state="error")
 
 def search_in_supabase(query_text):
     query_vector = embedder.encode(query_text).tolist()
@@ -290,9 +329,8 @@ elif st.session_state.current_page == "sources":
 
     if st.button("✅ Tamam (Ekle)"):
         if uploaded_files:
-            with st.spinner("Dosyalar okunuyor ve Supabase'e işleniyor..."):
-                for file in uploaded_files:
-                    process_and_save_document(file)
+            for file in uploaded_files:
+                process_and_save_document(file)
             st.session_state.uploader_key += 1
             st.rerun()
         else:
