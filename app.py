@@ -1,27 +1,19 @@
 import streamlit as st
 import io
 import PyPDF2
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
 from supabase import create_client, Client
 from sentence_transformers import SentenceTransformer
 
-try:
-    from pdf2image import convert_from_bytes
-    HAS_PDF2IMAGE = True
-except ImportError:
-    HAS_PDF2IMAGE = False
-
 # ---------------------------------------------------------
-# 1. Supabase ve Model Bağlantısı (Proje ID Entegre Edildi)
+# 1. Supabase ve Model Bağlantısı
 # ---------------------------------------------------------
 SUPABASE_URL = "https://zmamzsmfpspenhslskmq.supabase.co"
 
-# Supabase Key değerini Streamlit Secrets'tan güvenli şekilde çekiyoruz
 if "SUPABASE_KEY" in st.secrets:
     SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
 else:
-    # Eğer secrets tanımlı değilse buraya kendi anon/public key'ini yazabilirsin
-    SUPABASE_KEY = "BURAYA_SUPABASE_ANON_PUBLIC_KEY_DEGERINI_YAZ"
+    SUPABASE_KEY = "sb_publishable_U8ENbYwzvXhn5PXi9DNl8Q_hpKisi6x"
 
 @st.cache_resource
 def init_supabase() -> Client:
@@ -93,7 +85,6 @@ def process_and_save_document(file):
         for page_num, page in enumerate(reader.pages, start=1):
             text = page.extract_text() or ""
             if text.strip():
-                # Kelime bütünlüğünü bozmadan ~500 karakterlik parçalama
                 words = text.split()
                 chunk_words = []
                 curr_len = 0
@@ -144,8 +135,8 @@ def search_in_supabase(query_text):
         "match_chunks",
         {
             "query_embedding": query_vector,
-            "match_threshold": 0.20,
-            "match_count": 5
+            "match_threshold": 0.05,  # Eşik düşürüldü, daha esnek ve detaylı arama yapar
+            "match_count": 8          # Getirilen sonuç sayısı artırıldı
         }
     ).execute()
     return response.data if response.data else []
@@ -154,7 +145,6 @@ def delete_document(doc_id):
     supabase.table("documents").delete().eq("id", doc_id).execute()
 
 def generate_result_card(doc_name, page_num, content, score):
-    """Metni şık bir görsel karta dönüştürür (Ekran görüntüsü olarak indirmek için)."""
     img = Image.new("RGB", (900, 450), color="#ffffff")
     draw = ImageDraw.Draw(img)
     
