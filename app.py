@@ -1,16 +1,20 @@
 import streamlit as st
 import io
 import PyPDF2
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 from supabase import create_client, Client
 from sentence_transformers import SentenceTransformer
+try:
+    from pdf2image import convert_from_bytes
+    HAS_PDF2IMAGE = True
+except ImportError:
+    HAS_PDF2IMAGE = False
 
 # ---------------------------------------------------------
 # 1. Supabase ve Model Bağlantısı
 # ---------------------------------------------------------
-# Streamlit Secrets (.streamlit/secrets.toml) veya direkt değerler ile kullanılabilir
-SUPABASE_URL = st.secrets.get("SUPABASE_URL", "https://YOUR_SUPABASE_URL.supabase.co")
-SUPABASE_KEY = st.secrets.get("SUPABASE_KEY", "YOUR_SUPABASE_ANON_KEY")
+SUPABASE_URL = st.secrets["SUPABASE_URL"] if "SUPABASE_URL" in st.secrets else "https://YOUR_SUPABASE_URL.supabase.co"
+SUPABASE_KEY = st.secrets["SUPABASE_KEY"] if "SUPABASE_KEY" in st.secrets else "YOUR_SUPABASE_ANON_KEY"
 
 @st.cache_resource
 def init_supabase() -> Client:
@@ -18,14 +22,14 @@ def init_supabase() -> Client:
 
 @st.cache_resource
 def load_embedder():
-    # Türkçe ve çok dilli metinler için hafif ve etkili açık kaynaklı vektör modeli (384 boyutlu)
+    # Türkçe ve çok dilli metinler için vektör modeli
     return SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
 
 try:
     supabase = init_supabase()
     embedder = load_embedder()
 except Exception as e:
-    st.error(f"Bağlantı Kurulamadı: {e}")
+    st.error(f"Supabase / Model Bağlantı Hatası: {e}")
 
 # ---------------------------------------------------------
 # 2. Sayfa Yapılandırması ve Session State
@@ -63,10 +67,11 @@ custom_css = f"""
 st.markdown(custom_css, unsafe_allow_html=True)
 
 # ---------------------------------------------------------
-# Yardımcı Fonksiyonlar (Arama ve Döküman İşleme)
+# Yardımcı Fonksiyonlar (Döküman İşleme, Görsel & Arama)
 # ---------------------------------------------------------
 def process_and_save_document(file):
     filename = file.name
+    file_bytes = file.read()
     file_type = filename.split(".")[-1].lower()
     
     # 1. Supabase 'documents' tablosuna kayıt
@@ -76,14 +81,32 @@ def process_and_save_document(file):
     chunks_to_insert = []
 
     if file_type == "pdf":
-        reader = PyPDF2.PdfReader(file)
+        pdf_file = io.BytesIO(file_bytes)
+        reader = PyPDF2.PdfReader(pdf_file)
         for page_num, page in enumerate(reader.pages, start=1):
             text = page.extract_text() or ""
             if text.strip():
-                # Sayfa metnini parçala (her ~500 karakter)
-                chunk_size = 500
-                for i in range(0, len(text), chunk_size):
-                    chunk_text = text[i:i+chunk_size]
+                # Kelime bütünlüğünü bozmadan ~500 karakterlik parçalama
+                words = text.split()
+                chunk_words = []
+                curr_len = 0
+                for w in words:
+                    chunk_words.append(w)
+                    curr_len += len(w) + 1
+                    if curr_len >= 500:
+                        chunk_text = " ".join(chunk_words)
+                        vec = embedder.encode(chunk_text).tolist()
+                        chunks_to_insert.append({
+                            "document_id": doc_id,
+                            "document_name": filename,
+                            "page_number": page_num,
+                            "content": chunk_text,
+                            "embedding": vec
+                        })
+                        chunk_words = []
+                        curr_len = 0
+                if chunk_words:
+                    chunk_text = " ".join(chunk_words)
                     vec = embedder.encode(chunk_text).tolist()
                     chunks_to_insert.append({
                         "document_id": doc_id,
@@ -93,16 +116,15 @@ def process_and_save_document(file):
                         "embedding": vec
                     })
     elif file_type == "txt":
-        text = file.read().decode("utf-8")
-        chunk_size = 500
-        for i in range(0, len(text), chunk_size):
-            chunk_text = text[i:i+chunk_size]
-            vec = embedder.encode(chunk_text).tolist()
+        text = file_bytes.decode("utf-8", errors="ignore")
+        paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
+        for p_idx, para in enumerate(paragraphs, start=1):
+            vec = embedder.encode(para).tolist()
             chunks_to_insert.append({
                 "document_id": doc_id,
                 "document_name": filename,
-                "page_number": 1,
-                "content": chunk_text,
+                "page_number": p_idx,
+                "content": para,
                 "embedding": vec
             })
 
@@ -110,19 +132,52 @@ def process_and_save_document(file):
         supabase.table("document_chunks").insert(chunks_to_insert).execute()
 
 def search_in_supabase(query_text):
-    # Sadece Supabase veritabanındaki kaynaklarda arama yapar
     query_vector = embedder.encode(query_text).tolist()
-    
     response = supabase.rpc(
         "match_chunks",
         {
             "query_embedding": query_vector,
-            "match_threshold": 0.25,  # Benzerlik eşiği (0-1 arası)
-            "match_count": 5          # En alakalı ilk 5 sonuç
+            "match_threshold": 0.20,
+            "match_count": 5
         }
     ).execute()
+    return response.data if response.data else []
+
+def delete_document(doc_id):
+    supabase.table("documents").delete().eq("id", doc_id).execute()
+
+def generate_result_card(doc_name, page_num, content, score):
+    """Metni şık bir görsel karta dönüştürür (Ekran görüntüsü olarak indirmek için)."""
+    img = Image.new("RGB", (900, 450), color="#ffffff")
+    draw = ImageDraw.Draw(img)
     
-    return response.data
+    # Başlık ve Çerçeve
+    draw.rectangle([10, 10, 890, 440], outline="#1e3a8a", width=3)
+    draw.rectangle([10, 10, 890, 60], fill="#1e3a8a")
+    
+    header_text = f"Kaynak: {doc_name} | Sayfa/Bölüm: {page_num} | Alaka: %{score}"
+    draw.text((25, 25), header_text, fill="#ffffff")
+    
+    # İçerik Metni (Satır katlama)
+    words = content.split()
+    lines = []
+    curr_line = ""
+    for w in words:
+        if len(curr_line) + len(w) > 75:
+            lines.append(curr_line)
+            curr_line = w + " "
+        else:
+            curr_line += w + " "
+    lines.append(curr_line)
+    
+    y_pos = 90
+    for line in lines[:12]:  # En fazla 12 satır sığdır
+        draw.text((30, y_pos), line, fill="#1f2937")
+        y_pos += 25
+        
+    img_byte_arr = io.BytesIO()
+    img.save(img_byte_arr, format='PNG')
+    return img, img_byte_arr.getvalue()
 
 # ---------------------------------------------------------
 # Sayfa 1: ANA SAYFA
@@ -170,7 +225,6 @@ elif st.session_state.current_page == "sources":
     st.markdown("---")
 
     st.subheader("Supabase'de Kayıtlı Kaynaklar")
-    # Kayıtlı dökümanları doğrudan Supabase'den çek
     docs_res = supabase.table("documents").select("*").execute()
     existing_docs = docs_res.data if docs_res.data else []
 
@@ -178,7 +232,14 @@ elif st.session_state.current_page == "sources":
         st.info("Henüz veritabanında yüklenmiş bir kaynak bulunmuyor.")
     else:
         for idx, src in enumerate(existing_docs, 1):
-            st.write(f"**{idx}.** 📄 {src['name']} *({src['file_type'].upper()})*")
+            col_doc, col_del = st.columns([0.85, 0.15])
+            with col_doc:
+                st.write(f"**{idx}.** 📄 {src['name']} *({src['file_type'].upper()})*")
+            with col_del:
+                if st.button("🗑️ Sil", key=f"del_{src['id']}"):
+                    delete_document(src['id'])
+                    st.success(f"{src['name']} silindi.")
+                    st.rerun()
 
     st.markdown("---")
     st.subheader("Yeni Kaynak Ekle")
@@ -246,29 +307,27 @@ elif st.session_state.current_page == "results":
     st.markdown(f"**Aranan Konu:** *{st.session_state.search_query}*")
     st.markdown("---")
 
-    # SADECE KAYITLI DÖKÜMANLARDA ARAMA YAP
     with st.spinner("Sadece yüklenen kaynaklar taranıyor..."):
         search_results = search_in_supabase(st.session_state.search_query)
 
     if not search_results:
         st.warning("❌ Yüklenen kaynaklar içerisinde aradığınız konuyla alakalı herhangi bir içerik bulunamadı.")
     else:
-        st.subheader("🖼️ Bulunan Sayfalar ve Bölümler")
+        st.subheader("🖼️ Bulunan Sayfalar ve Bölümler (Görsel İnceleme)")
 
         selected_index = st.slider("Bulunan Sonuçlar Arasında Geçiş Yapın", 1, len(search_results), 1) - 1
         current_item = search_results[selected_index]
         similarity_pct = int(current_item["similarity"] * 100)
 
-        # Metin Kartı Görselleştirmesi
-        st.info(f"**Kitap / Döküman:** {current_item['document_name']} | **Sayfa:** {current_item['page_number']} | **Alaka Oranı:** %{similarity_pct}")
-        
-        # Temsili Sayfa Kartı Görseli Oluşturma
-        img = Image.new("RGB", (700, 300), color="#ffffff")
-        img_byte_arr = io.BytesIO()
-        img.save(img_byte_arr, format='PNG')
-        img_bytes = img_byte_arr.getvalue()
+        # Görsel Kart Üretimi
+        card_img, card_bytes = generate_result_card(
+            current_item['document_name'], 
+            current_item['page_number'], 
+            current_item['content'], 
+            similarity_pct
+        )
 
-        st.markdown(f"> *\"{current_item['content']}\"*")
+        st.image(card_img, caption=f"{current_item['document_name']} — Sayfa/Bölüm: {current_item['page_number']}", use_container_width=True)
 
         st.markdown("<br><hr><br>", unsafe_allow_html=True)
         st.subheader("📋 Alakalı Yerler Listesi (Alaka Sırasına Göre)")
@@ -280,8 +339,8 @@ elif st.session_state.current_page == "results":
 
         st.markdown("<br>", unsafe_allow_html=True)
         st.download_button(
-            label="📸 Görseli Galeriye Kaydet",
-            data=img_bytes,
+            label="📸 Görseli / Kartı Galeriye Kaydet",
+            data=card_bytes,
             file_name=f"{current_item['document_name']}_Sayfa_{current_item['page_number']}.png",
             mime="image/png"
         )
