@@ -5,7 +5,7 @@ from PIL import Image, ImageDraw
 from supabase import create_client, Client
 from sentence_transformers import SentenceTransformer
 
-# OCR için gerekli kütüphaneler
+# OCR kütüphaneleri
 try:
     from pdf2image import convert_from_bytes
     import pytesseract
@@ -73,7 +73,7 @@ custom_css = f"""
 st.markdown(custom_css, unsafe_allow_html=True)
 
 # ---------------------------------------------------------
-# Yardımcı Fonksiyonlar (OCR ve Anlamsal İşleme Dahil)
+# Yardımcı Fonksiyonlar (Hata Ayıklama Modlu OCR)
 # ---------------------------------------------------------
 def process_and_save_document(file):
     filename = file.name
@@ -94,26 +94,32 @@ def process_and_save_document(file):
         
         extracted_pages_text = {}
         
-        # 1. Adım: Standart PDF metin okuma denenir
+        # 1. Adım: Standart metin okuma denenir
         for page_num, page in enumerate(reader.pages, start=1):
             text = page.extract_text() or ""
             extracted_pages_text[page_num] = text.strip()
 
         total_chars = sum(len(t) for t in extracted_pages_text.values())
+        st.write(f"📄 '{filename}' dosyasından PyPDF2 ile okunan toplam karakter: {total_chars}")
 
-        # 2. Adım: Eğer metin çıkmadıysa ve OCR kütüphaneleri yüklüyse taranmış görsel PDF olarak işlenir
-        if total_chars == 0 and HAS_OCR:
-            st.info(f"📷 '{filename}' taranmış görsel PDF olarak algılandı. OCR (Görselden metin okuma) uygulanıyor...")
-            try:
-                images = convert_from_bytes(file_bytes)
-                for page_num, img in enumerate(images, start=1):
-                    # Türkçe karakter desteğiyle OCR yapılıyor
-                    ocr_text = pytesseract.image_to_string(img, lang='tur')
-                    extracted_pages_text[page_num] = ocr_text.strip()
-            except Exception as ocr_err:
-                st.warning(f"OCR İşlem Hatası: {ocr_err}")
+        # 2. Adım: Metin çıkmadıysa OCR devreye girer
+        if total_chars == 0:
+            if not HAS_OCR:
+                st.error("❌ Bu PDF taranmış bir görsel! Python OCR kütüphaneleri (pdf2image, pytesseract) yüklü değil.")
+            else:
+                st.info(f"📷 '{filename}' taranmış görsel PDF algılandı. OCR ile metinler taranıyor...")
+                try:
+                    images = convert_from_bytes(file_bytes)
+                    st.write(f"🖼️ Görsele dönüştürülen sayfa sayısı: {len(images)}")
+                    for page_num, img in enumerate(images, start=1):
+                        ocr_text = pytesseract.image_to_string(img, lang='tur')
+                        extracted_pages_text[page_num] = ocr_text.strip()
+                        st.write(f"Sayfa {page_num} OCR okunan karakter: {len(ocr_text.strip())}")
+                except Exception as ocr_err:
+                    st.error(f"❌ OCR Çalıştırılırken Kritik Hata: {ocr_err}")
+                    st.warning("Bu hata genellikle sunucuda 'tesseract-ocr' veya 'poppler' sistem paketlerinin kurulu olmadığını gösterir.")
 
-        # Okunan metinler parçalara (chunks) bölünerek vektörleştirilir
+        # Okunan metinleri parçalayıp vektörleştiriyoruz
         for page_num, text in extracted_pages_text.items():
             if text.strip():
                 words = text.split()
@@ -162,7 +168,7 @@ def process_and_save_document(file):
         supabase.table("document_chunks").insert(chunks_to_insert).execute()
         st.success(f"✅ '{filename}' başarıyla işlendi ve {len(chunks_to_insert)} parça veritabanına kaydedildi!")
     else:
-        st.error(f"❌ '{filename}' dosyasından hiç metin okunamadı! (Sunucuda Tesseract OCR araçlarının kurulu olduğundan emin olun).")
+        st.error(f"❌ '{filename}' için veritabanına eklenecek hiçbir metin parçası oluşturulamadı.")
 
 def search_in_supabase(query_text):
     query_vector = embedder.encode(query_text).tolist()
