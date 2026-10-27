@@ -7,3 +7,4 @@ langchain-community>=0.0.10
 chromadb>=0.4.22
 sentence-transformers>=2.2.2
 supabase>=2.0.0
+pytesseract>=0.3.10
