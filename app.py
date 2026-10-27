@@ -4,6 +4,7 @@ import PyPDF2
 from PIL import Image, ImageDraw, ImageFont
 from supabase import create_client, Client
 from sentence_transformers import SentenceTransformer
+
 try:
     from pdf2image import convert_from_bytes
     HAS_PDF2IMAGE = True
@@ -11,10 +12,16 @@ except ImportError:
     HAS_PDF2IMAGE = False
 
 # ---------------------------------------------------------
-# 1. Supabase ve Model Bağlantısı
+# 1. Supabase ve Model Bağlantısı (Proje ID Entegre Edildi)
 # ---------------------------------------------------------
-SUPABASE_URL = st.secrets["SUPABASE_URL"] if "SUPABASE_URL" in st.secrets else "https://YOUR_SUPABASE_URL.supabase.co"
-SUPABASE_KEY = st.secrets["SUPABASE_KEY"] if "SUPABASE_KEY" in st.secrets else "YOUR_SUPABASE_ANON_KEY"
+SUPABASE_URL = "https://zmamzsmfpspenhslskmq.supabase.co"
+
+# Supabase Key değerini Streamlit Secrets'tan güvenli şekilde çekiyoruz
+if "SUPABASE_KEY" in st.secrets:
+    SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
+else:
+    # Eğer secrets tanımlı değilse buraya kendi anon/public key'ini yazabilirsin
+    SUPABASE_KEY = "BURAYA_SUPABASE_ANON_PUBLIC_KEY_DEGERINI_YAZ"
 
 @st.cache_resource
 def init_supabase() -> Client:
@@ -151,14 +158,12 @@ def generate_result_card(doc_name, page_num, content, score):
     img = Image.new("RGB", (900, 450), color="#ffffff")
     draw = ImageDraw.Draw(img)
     
-    # Başlık ve Çerçeve
     draw.rectangle([10, 10, 890, 440], outline="#1e3a8a", width=3)
     draw.rectangle([10, 10, 890, 60], fill="#1e3a8a")
     
     header_text = f"Kaynak: {doc_name} | Sayfa/Bölüm: {page_num} | Alaka: %{score}"
     draw.text((25, 25), header_text, fill="#ffffff")
     
-    # İçerik Metni (Satır katlama)
     words = content.split()
     lines = []
     curr_line = ""
@@ -171,7 +176,7 @@ def generate_result_card(doc_name, page_num, content, score):
     lines.append(curr_line)
     
     y_pos = 90
-    for line in lines[:12]:  # En fazla 12 satır sığdır
+    for line in lines[:12]:
         draw.text((30, y_pos), line, fill="#1f2937")
         y_pos += 25
         
@@ -296,7 +301,7 @@ elif st.session_state.current_page == "settings":
         st.rerun()
 
 # ---------------------------------------------------------
-# Sayfa 4: SONUÇLAR VE CEVAP (Sadece Gerçek Kaynaklar)
+# Sayfa 4: SONUÇLAR VE CEVAP
 # ---------------------------------------------------------
 elif st.session_state.current_page == "results":
     if st.button("⬅️ Geri Dön", key="back_from_results"):
@@ -319,7 +324,6 @@ elif st.session_state.current_page == "results":
         current_item = search_results[selected_index]
         similarity_pct = int(current_item["similarity"] * 100)
 
-        # Görsel Kart Üretimi
         card_img, card_bytes = generate_result_card(
             current_item['document_name'], 
             current_item['page_number'], 
