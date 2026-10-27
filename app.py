@@ -5,14 +5,6 @@ from PIL import Image, ImageDraw
 from supabase import create_client, Client
 from sentence_transformers import SentenceTransformer
 
-# OCR (Taranmış PDF'ler için görselden metin okuma) kütüphaneleri
-try:
-    from pdf2image import convert_from_bytes
-    import pytesseract
-    HAS_OCR = True
-except ImportError:
-    HAS_OCR = False
-
 # ---------------------------------------------------------
 # 1. Supabase ve Model Bağlantısı
 # ---------------------------------------------------------
@@ -73,7 +65,7 @@ custom_css = f"""
 st.markdown(custom_css, unsafe_allow_html=True)
 
 # ---------------------------------------------------------
-# Yardımcı Fonksiyonlar (OCR ve Anlamsal İşleme Dahil)
+# Yardımcı Fonksiyonlar
 # ---------------------------------------------------------
 def process_and_save_document(file):
     filename = file.name
@@ -92,28 +84,8 @@ def process_and_save_document(file):
         pdf_file = io.BytesIO(file_bytes)
         reader = PyPDF2.PdfReader(pdf_file)
         
-        extracted_pages_text = {}
-        
-        # 1. Önce standart metin okuma (PyPDF2) denenir
         for page_num, page in enumerate(reader.pages, start=1):
             text = page.extract_text() or ""
-            extracted_pages_text[page_num] = text.strip()
-
-        # 2. Eğer PyPDF2 sayfaların çoğundan metin okuyamadıysa ve OCR aktifse, taranmış resim algılanır
-        total_extracted_chars = sum(len(t) for t in extracted_pages_text.values())
-        if total_extracted_chars < 50 and HAS_OCR:
-            st.info("📷 Taranmış görsel PDF algılandı! OCR (Görselden metin okuma) başlatılıyor...")
-            try:
-                images = convert_from_bytes(file_bytes)
-                for page_num, img in enumerate(images, start=1):
-                    # Türkçe karakter desteği ile Tesseract OCR çalıştırma
-                    ocr_text = pytesseract.image_to_string(img, lang='tur')
-                    extracted_pages_text[page_num] = ocr_text.strip()
-            except Exception as ocr_err:
-                st.warning(f"OCR İşlem Hatası: {ocr_err}")
-
-        # Okunan metinleri parçalara (chunks) bölüp vektörleştiriyoruz
-        for page_num, text in extracted_pages_text.items():
             if text.strip():
                 words = text.split()
                 chunk_words = []
@@ -143,7 +115,6 @@ def process_and_save_document(file):
                         "content": chunk_text,
                         "embedding": vec
                     })
-                    
     elif file_type == "txt":
         text = file_bytes.decode("utf-8", errors="ignore")
         paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
@@ -161,18 +132,19 @@ def process_and_save_document(file):
         supabase.table("document_chunks").insert(chunks_to_insert).execute()
         st.success(f"Toplam {len(chunks_to_insert)} parça veritabanına başarıyla işlendi!")
     else:
-        st.error("⚠️ Uyarı: Bu dosyadan hiç metin okunamadı! (Tesseract OCR paketinin yüklü olduğundan emin olun)")
+        st.error("⚠️ Uyarı: Bu dosyadan hiç metin okunamadı! PDF formatını kontrol edin.")
 
 def search_in_supabase(query_text):
     query_vector = embedder.encode(query_text).tolist()
     
-    # Saf ve Akıllı Anlamsal Arama (Eşik değeri 0.35 ile sadece güçlü anlam bağları getirilir)
+    # Eşik değerini 0.20 yaparak hem çok uzak/alakasız sonuçları eliyoruz 
+    # hem de "imanın şartları" / "inancın esasları" gibi yakın anlamları kaçırmıyoruz.
     response = supabase.rpc(
         "match_chunks",
         {
             "query_embedding": query_vector,
-            "match_threshold": 0.35,
-            "match_count": 5
+            "match_threshold": 0.20,
+            "match_count": 6
         }
     ).execute()
     
@@ -284,7 +256,7 @@ elif st.session_state.current_page == "sources":
 
     if st.button("✅ Tamam (Ekle)"):
         if uploaded_files:
-            with st.spinner("Dosyalar okunuyor ve Supabase'e işleniyor..."):
+            with st.spinner("Dosyalar Supabase veritabanına işleniyor..."):
                 for file in uploaded_files:
                     process_and_save_document(file)
             st.session_state.uploader_key += 1
@@ -342,7 +314,7 @@ elif st.session_state.current_page == "results":
         search_results = search_in_supabase(st.session_state.search_query)
 
     if not search_results or len(search_results) == 0:
-        st.warning("❌ Yüklenen kaynaklar içerisinde aradığınız konuyla alakalı güçlü ve anlamlı bir içerik bulunamadı.")
+        st.warning("❌ Yüklenen kaynaklar içerisinde aradığınız konuyla alakalı herhangi bir içerik bulunamadı.")
     else:
         st.subheader("🖼️ Bulunan Sayfalar ve Bölümler (Görsel İnceleme)")
 
