@@ -132,19 +132,18 @@ def process_and_save_document(file):
         supabase.table("document_chunks").insert(chunks_to_insert).execute()
         st.success(f"Toplam {len(chunks_to_insert)} parça veritabanına başarıyla işlendi!")
     else:
-        st.error("⚠️ Uyarı: Bu dosyadan hiç metin okunamadı! PDF formatını kontrol edin.")
+        st.error("⚠️ Uyarı: Bu dosyadan hiç metin okunamadı!")
 
 def search_in_supabase(query_text):
     query_vector = embedder.encode(query_text).tolist()
     
-    # Eşik değerini 0.20 yaparak hem çok uzak/alakasız sonuçları eliyoruz 
-    # hem de "imanın şartları" / "inancın esasları" gibi yakın anlamları kaçırmıyoruz.
+    # Eşik değerini 0.55 yaparak zayıf/alakasız eşleşmeleri tamamen eliyoruz
     response = supabase.rpc(
         "match_chunks",
         {
             "query_embedding": query_vector,
-            "match_threshold": 0.20,
-            "match_count": 6
+            "match_threshold": 0.55,
+            "match_count": 5
         }
     ).execute()
     
@@ -314,7 +313,7 @@ elif st.session_state.current_page == "results":
         search_results = search_in_supabase(st.session_state.search_query)
 
     if not search_results or len(search_results) == 0:
-        st.warning("❌ Yüklenen kaynaklar içerisinde aradığınız konuyla alakalı herhangi bir içerik bulunamadı.")
+        st.warning("❌ Yüklenen kaynaklar içerisinde aradığınız konuyla alakalı güçlü ve anlamlı bir içerik bulunamadı.")
     else:
         st.subheader("🖼️ Bulunan Sayfalar ve Bölümler (Görsel İnceleme)")
 
