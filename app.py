@@ -328,7 +328,8 @@ elif st.session_state.current_page == "results":
     with st.spinner("Sadece yüklenen kaynaklar taranıyor..."):
         search_results = search_in_supabase(st.session_state.search_query)
 
-    if not search_results:
+    # Güvenli kontrol: Sonuç yoksa slider'a girmeden durduruyoruz
+    if not search_results or len(search_results) == 0:
         st.warning("❌ Yüklenen kaynaklar içerisinde aradığınız konuyla alakalı herhangi bir içerik bulunamadı.")
         st.stop()
 
