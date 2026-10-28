@@ -73,7 +73,7 @@ custom_css = f"""
 st.markdown(custom_css, unsafe_allow_html=True)
 
 # ---------------------------------------------------------
-# Yardımcı Fonksiyonlar (Batch Inserter ile Güncellendi)
+# Yardımcı Fonksiyonlar (Detaylı Loglama ile Güncellendi)
 # ---------------------------------------------------------
 def process_and_save_document(file):
     filename = file.name
@@ -201,10 +201,12 @@ def process_and_save_document(file):
                         "embedding": vec
                     })
 
+        # Toplam oluşturulan chunk bilgisini ekrana yazdıralım (Teşhis için)
+        st.write(f"📊 Toplam oluşturulan parça (chunk) sayısı: {len(chunks_to_insert)}")
+
         if chunks_to_insert:
-            st.write(f"💾 Toplam {len(chunks_to_insert)} parça veritabanına parçalı (batch) olarak yazılıyor...")
+            st.write(f"💾 Parçalar veritabanına batch (10'arlı gruplar) olarak yazılıyor...")
             try:
-                # Payload sınırını aşmamak için 10'arlı gruplar halinde (batch) gönderiyoruz
                 batch_size = 10
                 for i in range(0, len(chunks_to_insert), batch_size):
                     batch = chunks_to_insert[i:i + batch_size]
@@ -213,7 +215,7 @@ def process_and_save_document(file):
                 status.update(label=f"✅ '{filename}' başarıyla işlendi ve kaydedildi!", state="complete", expanded=False)
             except Exception as e:
                 status.update(label="❌ Supabase'e chunk eklenirken hata oluştu!", state="error")
-                st.error(f"Detay: {e}")
+                st.error(f"Veritabanı Kayıt Hatası Detayı: {e}")
         else:
             status.update(label=f"❌ '{filename}' dosyasından okunabilir metin çıkarılamadı!", state="error")
 
