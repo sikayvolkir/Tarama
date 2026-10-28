@@ -14,7 +14,7 @@ except ImportError:
     HAS_OCR = False
 
 # ---------------------------------------------------------
-# 1. Supabase ve Model Bağlantısı
+# 1. Supabase-py ve Model Bağlantısı
 # ---------------------------------------------------------
 SUPABASE_URL = "https://zmamzsmfpspenhslskmq.supabase.co"
 
@@ -73,18 +73,22 @@ custom_css = f"""
 st.markdown(custom_css, unsafe_allow_html=True)
 
 # ---------------------------------------------------------
-# Yardımcı Fonksiyonlar (Canlı Durum Takipli İşleme)
+# Yardımcı Fonksiyonlar (Batch Inserter ile Güncellendi)
 # ---------------------------------------------------------
 def process_and_save_document(file):
     filename = file.name
     file_bytes = file.read()
     file_type = filename.split(".")[-1].lower()
     
-    # Canlı Adım Takip Ekranı (Status Box)
     with st.status(f"📥 '{filename}' işleniyor...", expanded=True) as status:
-        
         st.write("🔄 Supabase 'documents' tablosuna kayıt açılıyor...")
-        doc_res = supabase.table("documents").insert({"name": filename, "file_type": file_type}).execute()
+        try:
+            doc_res = supabase.table("documents").insert({"name": filename, "file_type": file_type}).execute()
+        except Exception as e:
+            status.update(label="❌ 'documents' tablosuna kayıt atılamadı!", state="error")
+            st.error(f"Hata detayı: {e}")
+            return
+
         if not doc_res.data:
             status.update(label="❌ Hata: Döküman ana tablosuna kaydedilemedi!", state="error")
             return
@@ -98,7 +102,6 @@ def process_and_save_document(file):
             pdf_file = io.BytesIO(file_bytes)
             reader = PyPDF2.PdfReader(pdf_file)
             
-            # 1. Adım: Standart metin okuma denenir
             for page_num, page in enumerate(reader.pages, start=1):
                 text = page.extract_text() or ""
                 extracted_pages_text[page_num] = text.strip()
@@ -106,27 +109,25 @@ def process_and_save_document(file):
             total_chars = sum(len(t) for t in extracted_pages_text.values())
             st.write(f"🔎 Standart okuma ile bulunan toplam karakter: {total_chars}")
 
-            # 2. Adım: Metin yoksa ve taranmış PDF ise OCR devreye girer
             if total_chars < 20:
                 if not HAS_OCR:
                     status.update(label="❌ Taranmış PDF algılandı ancak OCR kütüphaneleri eksik!", state="error")
                     st.error("Python ortamında 'pdf2image' ve 'pytesseract' kütüphaneleri kurulu değil.")
                     return
                 
-                st.write("📷 Taranmış görsel PDF algılandı! OCR (Görselden metin okuma) başlatılıyor...")
+                st.write("📷 Taranmış görsel PDF algılandı! OCR başlatılıyor...")
                 try:
                     images = convert_from_bytes(file_bytes)
-                    st.write(f"🖼️ Toplam {len(images)} sayfa görsele dönüştürüldü, metinler taranıyor...")
                     for page_num, img in enumerate(images, start=1):
                         ocr_text = pytesseract.image_to_string(img, lang='tur')
                         extracted_pages_text[page_num] = ocr_text.strip()
-                        st.write(f"✔️ Sayfa {page_num} OCR ile okundu ({len(ocr_text.strip())} karakter).")
+                        st.write(f"✔️ Sayfa {page_num} OCR ile okundu.")
                 except Exception as ocr_err:
                     status.update(label="❌ OCR İşlem Hatası!", state="error")
-                    st.error(f"OCR çalıştırılırken hata oluştu: {ocr_err}")
+                    st.error(f"OCR hatası: {ocr_err}")
                     return
 
-            st.write("🧠 Metinler anlam bütünlüğüne göre parçalara (chunks) ayrılıyor ve vektörleştiriliyor...")
+            st.write("🧠 Metinler parçalara ayrılıyor ve vektörleştiriliyor...")
             for page_num, text in extracted_pages_text.items():
                 if text.strip():
                     words = text.split()
@@ -170,8 +171,6 @@ def process_and_save_document(file):
             if not text:
                 text = file_bytes.decode("utf-8", errors="ignore")
                 
-            st.write(f"📊 Okunan toplam metin uzunluğu: {len(text)} karakter")
-            
             if text.strip():
                 words = text.split()
                 chunk_words = []
@@ -203,9 +202,18 @@ def process_and_save_document(file):
                     })
 
         if chunks_to_insert:
-            st.write("💾 Supabase 'document_chunks' tablosuna kayıtlar yazılıyor...")
-            supabase.table("document_chunks").insert(chunks_to_insert).execute()
-            status.update(label=f"✅ '{filename}' başarıyla işlendi ({len(chunks_to_insert)} parça kaydedildi)!", state="complete", expanded=False)
+            st.write(f"💾 Toplam {len(chunks_to_insert)} parça veritabanına parçalı (batch) olarak yazılıyor...")
+            try:
+                # Payload sınırını aşmamak için 10'arlı gruplar halinde (batch) gönderiyoruz
+                batch_size = 10
+                for i in range(0, len(chunks_to_insert), batch_size):
+                    batch = chunks_to_insert[i:i + batch_size]
+                    supabase.table("document_chunks").insert(batch).execute()
+                
+                status.update(label=f"✅ '{filename}' başarıyla işlendi ve kaydedildi!", state="complete", expanded=False)
+            except Exception as e:
+                status.update(label="❌ Supabase'e chunk eklenirken hata oluştu!", state="error")
+                st.error(f"Detay: {e}")
         else:
             status.update(label=f"❌ '{filename}' dosyasından okunabilir metin çıkarılamadı!", state="error")
 
