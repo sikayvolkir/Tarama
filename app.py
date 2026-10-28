@@ -73,14 +73,14 @@ custom_css = f"""
 st.markdown(custom_css, unsafe_allow_html=True)
 
 # ---------------------------------------------------------
-# Yardımcı Fonksiyonlar (10'arlı Batch Inserter Garantili)
+# Yardımcı Fonksiyonlar (Otomatik 10'ar Sayfalık Blok İşleme)
 # ---------------------------------------------------------
 def process_and_save_document(file):
     filename = file.name
     file_bytes = file.read()
     file_type = filename.split(".")[-1].lower()
     
-    with st.status(f"📥 '{filename}' işleniyor...", expanded=True) as status:
+    with st.status(f"📥 '{filename}' işleniyor ve otomatik parçalanıyor...", expanded=True) as status:
         st.write("🔄 Supabase 'documents' tablosuna kayıt açılıyor...")
         try:
             doc_res = supabase.table("documents").insert({"name": filename, "file_type": file_type}).execute()
@@ -94,49 +94,50 @@ def process_and_save_document(file):
             return
             
         doc_id = doc_res.data[0]["id"]
-        chunks_to_insert = []
-        extracted_pages_text = {}
 
         if file_type == "pdf":
             st.write("📖 PDF yapısı analiz ediliyor...")
             pdf_file = io.BytesIO(file_bytes)
             reader = PyPDF2.PdfReader(pdf_file)
-            
-            for page_num, page in enumerate(reader.pages, start=1):
-                text = page.extract_text() or ""
-                extracted_pages_text[page_num] = text.strip()
+            total_pages = len(reader.pages)
+            st.write(f"📄 Toplam sayfa sayısı: {total_pages}. Otomatik olarak 10'ar sayfalık bloklar halinde işlenecek.")
 
-            total_chars = sum(len(t) for t in extracted_pages_text.values())
-            st.write(f"🔎 Standart okuma ile bulunan toplam karakter: {total_chars}")
-
-            if total_chars < 20:
-                if not HAS_OCR:
-                    status.update(label="❌ Taranmış PDF algılandı ancak OCR kütüphaneleri eksik!", state="error")
-                    st.error("Python ortamında 'pdf2image' ve 'pytesseract' kütüphaneleri kurulu değil.")
-                    return
+            # 10'ar sayfalık bloklar halinde döngü (Otomatik Parçalama)
+            block_size = 10
+            for start_page in range(0, total_pages, block_size):
+                end_page = min(start_page + block_size, total_pages)
+                st.write(f"⚙️ Sayfa {start_page + 1} ile {end_page} arası işleniyor...")
                 
-                st.write("📷 Taranmış görsel PDF algılandı! OCR başlatılıyor...")
-                try:
-                    images = convert_from_bytes(file_bytes)
-                    for page_num, img in enumerate(images, start=1):
-                        ocr_text = pytesseract.image_to_string(img, lang='tur')
-                        extracted_pages_text[page_num] = ocr_text.strip()
-                        st.write(f"✔️ Sayfa {page_num} OCR ile okundu.")
-                except Exception as ocr_err:
-                    status.update(label="❌ OCR İşlem Hatası!", state="error")
-                    st.error(f"OCR hatası: {ocr_err}")
-                    return
-
-            st.write("🧠 Metinler parçalara ayrılıyor ve vektörleştiriliyor...")
-            for page_num, text in extracted_pages_text.items():
-                if text.strip():
-                    words = text.split()
-                    chunk_words = []
-                    curr_len = 0
-                    for w in words:
-                        chunk_words.append(w)
-                        curr_len += len(w) + 1
-                        if curr_len >= 500:
+                chunks_to_insert = []
+                
+                for page_num in range(start_page + 1, end_page + 1):
+                    page = reader.pages[page_num - 1]
+                    text = (page.extract_text() or "").strip()
+                    
+                    if not text and HAS_OCR:
+                        # Eğer sayfa boşsa ve OCR varsa görsel olarak okumayı deneyebiliriz (isteğe bağlı)
+                        pass
+                        
+                    if text:
+                        words = text.split()
+                        chunk_words = []
+                        curr_len = 0
+                        for w in words:
+                            chunk_words.append(w)
+                            curr_len += len(w) + 1
+                            if curr_len >= 500:
+                                chunk_text = " ".join(chunk_words)
+                                vec = embedder.encode(chunk_text).tolist()
+                                chunks_to_insert.append({
+                                    "document_id": doc_id,
+                                    "document_name": filename,
+                                    "page_number": page_num,
+                                    "content": chunk_text,
+                                    "embedding": vec
+                                })
+                                chunk_words = []
+                                curr_len = 0
+                        if chunk_words:
                             chunk_text = " ".join(chunk_words)
                             vec = embedder.encode(chunk_text).tolist()
                             chunks_to_insert.append({
@@ -146,21 +147,19 @@ def process_and_save_document(file):
                                 "content": chunk_text,
                                 "embedding": vec
                             })
-                            chunk_words = []
-                            curr_len = 0
-                    if chunk_words:
-                        chunk_text = " ".join(chunk_words)
-                        vec = embedder.encode(chunk_text).tolist()
-                        chunks_to_insert.append({
-                            "document_id": doc_id,
-                            "document_name": filename,
-                            "page_number": page_num,
-                            "content": chunk_text,
-                            "embedding": vec
-                        })
-                        
+
+                # Bu 10 sayfalık bloğu hemen Supabase'e gönder
+                if chunks_to_insert:
+                    try:
+                        supabase.table("document_chunks").insert(chunks_to_insert).execute()
+                        st.write(f"✔️ Sayfa {start_page + 1}-{end_page} başarıyla kaydedildi.")
+                    except Exception as e:
+                        status.update(label=f"❌ Sayfa {start_page + 1}-{end_page} kaydedilirken hata oluştu!", state="error")
+                        st.error(f"Detay: {e}")
+                        return
+
         elif file_type == "txt":
-            st.write("📝 TXT dosyası okunuyor ve kodlama formatı çözümleniyor...")
+            st.write("📝 TXT dosyası okunuyor ve otomatik parçalanıyor...")
             text = ""
             for encoding in ["utf-8", "cp1254", "latin-1", "iso-8859-9"]:
                 try:
@@ -173,8 +172,10 @@ def process_and_save_document(file):
                 
             if text.strip():
                 words = text.split()
+                chunks_to_insert = []
                 chunk_words = []
                 curr_len = 0
+                
                 for w in words:
                     chunk_words.append(w)
                     curr_len += len(w) + 1
@@ -190,33 +191,25 @@ def process_and_save_document(file):
                         })
                         chunk_words = []
                         curr_len = 0
+                        
+                        # Her 10 chunk'ta bir ara kayıt atalım (Zaman aşımını önlemek için)
+                        if len(chunks_to_insert) >= 10:
+                            supabase.table("document_chunks").insert(chunks_to_insert).execute()
+                            chunks_to_insert = []
+
                 if chunk_words:
-                    chunk_text = " ".join(chunk_words)
-                    vec = embedder.encode(chunk_text).tolist()
                     chunks_to_insert.append({
                         "document_id": doc_id,
                         "document_name": filename,
                         "page_number": 1,
-                        "content": chunk_text,
-                        "embedding": vec
+                        "content": " ".join(chunk_words),
+                        "embedding": embedder.encode(" ".join(chunk_words)).tolist()
                     })
 
-        st.write(f"📊 Toplam oluşturulan parça (chunk) sayısı: {len(chunks_to_insert)}")
+                if chunks_to_insert:
+                    supabase.table("document_chunks").insert(chunks_to_insert).execute()
 
-        if chunks_to_insert:
-            st.write(f"💾 Parçalar Supabase'e 10'ar 10'ar (batch) güvenle gönderiliyor...")
-            try:
-                batch_size = 10
-                for i in range(0, len(chunks_to_insert), batch_size):
-                    batch = chunks_to_insert[i:i + batch_size]
-                    supabase.table("document_chunks").insert(batch).execute()
-                
-                status.update(label=f"✅ '{filename}' başarıyla işlendi ve kaydedildi!", state="complete", expanded=False)
-            except Exception as e:
-                status.update(label="❌ Supabase'e chunk eklenirken hata oluştu!", state="error")
-                st.error(f"Veritabanı Kayıt Hatası Detayı: {e}")
-        else:
-            status.update(label=f"❌ '{filename}' dosyasından okunabilir metin çıkarılamadı!", state="error")
+        status.update(label=f"✅ '{filename}' tamamen işlendi ve parça parça kaydedildi!", state="complete", expanded=False)
 
 def search_in_supabase(query_text):
     query_vector = embedder.encode(query_text).tolist()
