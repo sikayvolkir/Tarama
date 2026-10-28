@@ -73,7 +73,7 @@ custom_css = f"""
 st.markdown(custom_css, unsafe_allow_html=True)
 
 # ---------------------------------------------------------
-# Yardımcı Fonksiyonlar (Detaylı Loglama ile Güncellendi)
+# Yardımcı Fonksiyonlar (10'arlı Batch Inserter Garantili)
 # ---------------------------------------------------------
 def process_and_save_document(file):
     filename = file.name
@@ -201,11 +201,10 @@ def process_and_save_document(file):
                         "embedding": vec
                     })
 
-        # Toplam oluşturulan chunk bilgisini ekrana yazdıralım (Teşhis için)
         st.write(f"📊 Toplam oluşturulan parça (chunk) sayısı: {len(chunks_to_insert)}")
 
         if chunks_to_insert:
-            st.write(f"💾 Parçalar veritabanına batch (10'arlı gruplar) olarak yazılıyor...")
+            st.write(f"💾 Parçalar Supabase'e 10'ar 10'ar (batch) güvenle gönderiliyor...")
             try:
                 batch_size = 10
                 for i in range(0, len(chunks_to_insert), batch_size):
@@ -281,7 +280,7 @@ if st.session_state.current_page == "home":
     
     col_left, col_center, col_right = st.columns([0.15, 0.7, 0.15])
     with col_center:
-        user_input = st.text_input("", placeholder="Aramak istediğiniz kavram veya soruyu yazın...", label_visibility="collapsed")
+        user_input = st.text_input("Arama", placeholder="Aramak istediğiniz kavram veya soruyu yazın...", label_visibility="collapsed")
         
         btn_col1, btn_col2, btn_col3 = st.columns([0.4, 0.2, 0.4])
         with btn_col2:
